@@ -1,5 +1,6 @@
 using UnityEngine;
 using System;
+using System.Collections.Generic;
 
 [DisallowMultipleComponent]
 public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
@@ -24,11 +25,14 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
     public float duration = 1.0f;
     public AnimationCurve ease = AnimationCurve.EaseInOut(0, 0, 1, 1);
     public PathMode pathMode = PathMode.Curved;
+    [Tooltip("Vertical arc height (used for fallback arc or combined with horizontal curve).")]
     public float arcHeight = 0.7f;
     public bool slerpRotation = true;
 
     [Header("Raycast")]
     public LayerMask raycastMask = ~0;
+    [Tooltip("Camera used for ScreenPointToRay for clicks. If null, Camera.main will be used.")]
+    public Camera raycastCamera;
 
     [Header("Mouse Look Integration")]
     [Tooltip("Reference to the CameraPositionDrivenMicroLook script")]
@@ -36,25 +40,51 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
     [Tooltip("Blend time (seconds) for the mouse look influence when fading in/out")]
     public float mouseLookBlendTime = 0.35f;
 
+    // --- Path definitions (new) --------------------------------------
+    [System.Serializable]
+    public class PathDefinition
+    {
+        [Tooltip("index of source camera point")]
+        public int fromIndex;
+        [Tooltip("index of destination camera point")]
+        public int toIndex;
+        [Tooltip("Optional control points (in world space) that the camera should pass through. Leave empty for direct curve.")]
+        public Transform[] controlPoints;
+        [Tooltip("If true, the curve will be computed in XZ plane (horizontal) and arcHeight applied vertically on top.")]
+        public bool treatAsHorizontalOnly = true;
+        [Tooltip("Multiplier applied to lateral offsets of control points (useful if you want to exaggerate)")]
+        public float lateralMultiplier = 1f;
+        [Tooltip("Catmull-Rom tension parameter (0..1). Lower = smoother, higher = tighter.")]
+        [Range(0f, 1f)]
+        public float tension = 0.5f;
+        [Tooltip("Color used to draw the gizmo for this path")]
+        public Color gizmoColor = Color.cyan;
+    }
+
+    [Tooltip("List of custom path definitions between camera points (fromIndex -> toIndex).")]
+    public PathDefinition[] customPaths;
+
     // Events
     public event Action<int> OnTransitionStart;    // passes destination index
     public event Action<int> OnTransitionComplete; // passes final index
 
     // internal
-    [SerializeField]
-    int currentIndex = 0;           // current active camera index
+    public int currentIndex { get; private set; }          // current active camera index
     int destinationIndex = -1;      // target index while transitioning
     bool isTransitioning = false;
     float t = 0f;
     Vector3 startPos;
     Quaternion startRot;
-    Vector3 p0, p1, p2;
     float currentDuration;
+
+    // Path sampling cache
+    Vector3[] activePathPoints; // points used by current path (including start & end)
+    int activeSampleResolution = 60; // number of samples (used only for OnDrawGizmos preview)
 
     void Reset()
     {
         duration = 1.0f;
-        ease = AnimationCurve.EaseInOut(0,0,1,1);
+        ease = AnimationCurve.EaseInOut(0, 0, 1, 1);
         pathMode = PathMode.Curved;
         arcHeight = 0.7f;
         slerpRotation = true;
@@ -62,6 +92,7 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
 
     void Start()
     {
+        currentIndex = 0;
         if (HasCameraPoints())
         {
             currentIndex = Mathf.Clamp(currentIndex, 0, cameraPoints.Length - 1);
@@ -71,7 +102,6 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         {
             Debug.LogWarning("[CameraMover] No cameraPoints assigned. Assign cameraPoints in inspector.");
         }
-
         ValidateArrays();
     }
 
@@ -79,19 +109,16 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
     {
         if (!HasCameraPoints()) return;
 
-        // Ensure forward/back arrays exist and are the expected length (defensive)
         if (forwardColliders == null || forwardColliders.Length != cameraPoints.Length)
         {
             forwardColliders = new Collider[cameraPoints.Length];
-            // leaving entries null — inspector should populate
-            Debug.LogWarning("[CameraMover] forwardColliders was missing or wrong length. Created empty array. Populate in inspector: forwardColliders[i] is clicked while AT i to go to i+1.");
+            Debug.LogWarning("[CameraMover] forwardColliders was missing or wrong length. Created empty array.");
         }
         if (backColliders == null || backColliders.Length != cameraPoints.Length)
         {
             backColliders = new Collider[cameraPoints.Length];
-            Debug.LogWarning("[CameraMover] backColliders was missing or wrong length. Created empty array. Populate in inspector: backColliders[i] is clicked while AT i to go to i-1.");
+            Debug.LogWarning("[CameraMover] backColliders was missing or wrong length. Created empty array.");
         }
-
         if (profiles != null && profiles.Length != 0 && profiles.Length != cameraPoints.Length)
             Debug.LogWarning("[CameraMover] profiles length does not match cameraPoints length. Missing profiles will use mouseLook.profile as fallback.");
     }
@@ -107,20 +134,38 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
             t += Time.deltaTime / Mathf.Max(0.0001f, currentDuration);
             float eval = ease.Evaluate(Mathf.Clamp01(t));
 
-            Transform targetTransform = GetTargetTransform(destinationIndex);
-
             // position
-            if (pathMode == PathMode.Straight)
+            if (pathMode == PathMode.Straight || activePathPoints == null || activePathPoints.Length == 0)
             {
-                transform.position = Vector3.LerpUnclamped(startPos, GetTargetPosition(targetTransform), eval);
+                // fallback to old behavior: straight or simple vertical arc
+                if (pathMode == PathMode.Straight)
+                {
+                    Transform targetTransform = GetTargetTransform(destinationIndex);
+                    transform.position = Vector3.LerpUnclamped(startPos, GetTargetPosition(targetTransform), eval);
+                }
+                else
+                {
+                    // vertical arc fallback (old behavior)
+                    Transform targetTransform = GetTargetTransform(destinationIndex);
+                    Vector3 end = GetTargetPosition(targetTransform);
+                    Vector3 pos = Vector3.LerpUnclamped(startPos, end, eval);
+                    // add vertical arc
+                    float arc = Mathf.Sin(Mathf.Clamp01(eval) * Mathf.PI) * arcHeight;
+                    pos.y += arc;
+                    transform.position = pos;
+                }
             }
             else
             {
-                transform.position = BezierQuadratic(p0, p1, p2, eval);
+                // sample along the custom path using Catmull-Rom
+                float sampleT = Mathf.Clamp01(eval);
+                Vector3 pos = SamplePathPosition(activePathPoints, sampleT);
+                transform.position = pos;
             }
 
             // rotation
-            Quaternion targetRot = GetTargetRotation(targetTransform);
+            Transform targetRotT = GetTargetTransform(destinationIndex);
+            Quaternion targetRot = GetTargetRotation(targetRotT);
             if (slerpRotation)
                 transform.rotation = Quaternion.Slerp(startRot, targetRot, eval);
             else
@@ -143,13 +188,14 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
     {
         if (Input.GetMouseButtonDown(0) && !isTransitioning)
         {
-            Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+            Camera cam = raycastCamera != null ? raycastCamera : Camera.main;
+            if (cam == null) return;
+            Ray ray = cam.ScreenPointToRay(Input.mousePosition);
             if (Physics.Raycast(ray, out RaycastHit hit, 200f, raycastMask))
             {
-                // First check forward/back arrays for currentIndex
+                // priority: forward/back colliders for current index
                 if (HasCameraPoints())
                 {
-                    // check forward collider at currentIndex -> move to currentIndex+1
                     if (currentIndex >= 0 && currentIndex < forwardColliders.Length)
                     {
                         var f = forwardColliders[currentIndex];
@@ -159,8 +205,6 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
                             return;
                         }
                     }
-
-                    // check back collider at currentIndex -> move to currentIndex-1
                     if (currentIndex >= 0 && currentIndex < backColliders.Length)
                     {
                         var b = backColliders[currentIndex];
@@ -171,17 +215,13 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
                         }
                     }
 
-                    // As a convenience/compat: if user also filled forward/back for adjacent slot (e.g. clicking a door that sits at the destination)
-                    // check forward collider of the previous index (that might be the same physical collider)
-                    // This makes it tolerant if you assigned collider to the destination's forward/back instead of the source.
-                    // Check neighbor forward/back colliders too (defensive).
-                    // previous index forward (maps to currentIndex if clicked from neighbor)
+                    // defensive neighbor checks (if you've assigned on neighbor)
                     if (currentIndex - 1 >= 0)
                     {
                         var fp = forwardColliders[currentIndex - 1];
                         if (fp != null && hit.collider == fp)
                         {
-                            TryMoveToIndex(currentIndex); // same as moving to currentIndex (should be handled above normally)
+                            TryMoveToIndex(currentIndex); // redundant
                             return;
                         }
                     }
@@ -195,13 +235,10 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
                         }
                     }
                 }
-
-                // If none matched, ignore the click
             }
         }
     }
 
-    // Attempt a move to targetIndex with adjacency check (only neighbor moves allowed)
     void TryMoveToIndex(int targetIndex)
     {
         if (!HasCameraPoints())
@@ -209,24 +246,14 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
             Debug.LogWarning("[CameraMover] TryMoveToIndex called but cameraPoints not configured.");
             return;
         }
-
-        // clamp
         targetIndex = Mathf.Clamp(targetIndex, 0, cameraPoints.Length - 1);
-
-        if (targetIndex == currentIndex)
-            return; // already here
-
+        if (targetIndex == currentIndex) return;
         if (Mathf.Abs(targetIndex - currentIndex) == 1)
         {
             StartTransitionToIndex(targetIndex);
         }
-        else
-        {
-            // Not adjacent — ignore
-        }
     }
 
-    // Public API: start transition to a specific index (obeys adjacency)
     public void StartTransitionToIndex(int targetIndex)
     {
         if (!HasCameraPoints())
@@ -242,7 +269,6 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
             Debug.LogWarning($"[CameraMover] StartTransitionToIndex: target {targetIndex} is not adjacent to current {currentIndex}. Ignored.");
             return;
         }
-
         BeginTransitionToIndex(targetIndex);
     }
 
@@ -262,25 +288,15 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         currentDuration = Mathf.Max(0.01f, duration);
         t = 0f;
 
-        if (pathMode == PathMode.Curved)
-        {
-            p0 = startPos;
-            p2 = GetTargetPosition(target);
-            Vector3 mid = (p0 + p2) * 0.5f;
-            Vector3 forwardDir = (p2 - p0).normalized;
-            float forwardPush = Mathf.Clamp01(Vector3.Distance(p0, p2) * 0.2f);
-            mid += forwardDir * forwardPush;
-            float distance = Vector3.Distance(p0, p2);
-            float scaledArc = arcHeight * Mathf.Clamp01(distance / 3f);
-            mid += Vector3.up * scaledArc;
-            p1 = mid;
-        }
+        // build activePathPoints by checking customPaths
+        activePathPoints = BuildActivePathPoints(currentIndex, destinationIndex);
+
+        // if using Curved fallback and no custom path, compute p0/p1/p2 via arc: handled in Update
 
         if (mouseLook != null)
         {
             mouseLook.BlendOut(mouseLookBlendTime);
         }
-
         OnTransitionStart?.Invoke(destinationIndex);
     }
 
@@ -295,34 +311,27 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         isTransitioning = false;
         t = 0f;
 
-        // update current index
         currentIndex = Mathf.Clamp(destinationIndex, 0, cameraPoints.Length - 1);
         destinationIndex = -1;
 
-        // Apply mouseLook profile for this point (if any), and restore mouseLook smoothly
+        // clear active path
+        activePathPoints = null;
+
         if (mouseLook != null)
         {
             CameraPositionDrivenMicroLook.Profile applyProfile;
-
             if (profiles != null && profiles.Length == cameraPoints.Length)
             {
                 applyProfile = profiles[currentIndex];
             }
             else
             {
-                // fallback to the mouseLook's inspector default
                 applyProfile = mouseLook.profile;
             }
 
             mouseLook.ApplyProfile(applyProfile);
-
-            // set neutral pose to the camera final pose so offsets are computed relative to this position
             mouseLook.SetInitialToCurrent();
-
-            // sync yaw/pitch internal values
             mouseLook.SyncToCameraRotationInstant();
-
-            // blend influence back in
             mouseLook.BlendIn(mouseLookBlendTime);
         }
 
@@ -346,13 +355,141 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         return target != null ? target.rotation : transform.rotation;
     }
 
-    static Vector3 BezierQuadratic(Vector3 a, Vector3 b, Vector3 c, float t)
+    // --- Path building & sampling -------------------------------------
+
+    // Return path points (world positions) for transition current->dest, or null if none
+    Vector3[] BuildActivePathPoints(int fromIdx, int toIdx)
     {
-        float u = 1f - t;
-        return u * u * a + 2f * u * t * b + t * t * c;
+        if (customPaths == null || customPaths.Length == 0) return null;
+
+        // find a matching path def (either direction)
+        PathDefinition def = null;
+        foreach (var p in customPaths)
+        {
+            if (p == null) continue;
+            if ((p.fromIndex == fromIdx && p.toIndex == toIdx) || (p.fromIndex == toIdx && p.toIndex == fromIdx))
+            {
+                def = p;
+                break;
+            }
+        }
+        if (def == null) return null;
+
+        // Build points list: start, controlPoints..., end
+        List<Vector3> pts = new List<Vector3>();
+        Vector3 start = GetTargetPosition(cameraPoints[fromIdx]);
+        Vector3 end = GetTargetPosition(cameraPoints[toIdx]);
+        pts.Add(start);
+
+        if (def.controlPoints != null && def.controlPoints.Length > 0)
+        {
+            // append control points world positions; if connection reversed, reverse order
+            if (def.fromIndex == fromIdx)
+            {
+                foreach (var ct in def.controlPoints)
+                {
+                    if (ct == null) continue;
+                    Vector3 p = ct.position;
+                    if (def.treatAsHorizontalOnly)
+                    {
+                        // if horizontal-only, apply lateral multiplier in local XZ plane relative to segment
+                        // but we assume control points are placed in world where you want them so just use them
+                        // multiply lateral offset around mid to exaggerate if needed:
+                        Vector3 mid = (start + end) * 0.5f;
+                        Vector3 lateral = p - mid;
+                        lateral.y = 0f;
+                        p = mid + lateral * def.lateralMultiplier + Vector3.up * p.y;
+                    }
+                    pts.Add(p);
+                }
+            }
+            else
+            {
+                // path def is reversed relative to current direction: add control points in reverse order
+                for (int i = def.controlPoints.Length - 1; i >= 0; i--)
+                {
+                    var ct = def.controlPoints[i];
+                    if (ct == null) continue;
+                    Vector3 p = ct.position;
+                    if (def.treatAsHorizontalOnly)
+                    {
+                        Vector3 mid = (start + end) * 0.5f;
+                        Vector3 lateral = p - mid;
+                        lateral.y = 0f;
+                        p = mid + lateral * def.lateralMultiplier + Vector3.up * p.y;
+                    }
+                    pts.Add(p);
+                }
+            }
+        }
+
+        pts.Add(end);
+
+        // convert to array
+        return pts.ToArray();
     }
 
-    // Utility: instant snap to an index (useful on load)
+    // Sample a position along a poly-curve defined by pts[] using Catmull-Rom.
+    // t in [0,1] across entire path. Preserves vertex Y by default but supports horizontal-only flag
+    Vector3 SamplePathPosition(Vector3[] pts, float t01)
+    {
+        if (pts == null || pts.Length == 0) return transform.position;
+        if (pts.Length == 1) return pts[0];
+        if (pts.Length == 2) return Vector3.Lerp(pts[0], pts[1], t01);
+
+        // Map t01 to segment index
+        int segments = pts.Length - 1;
+        float scaled = t01 * segments;
+        int seg = Mathf.Clamp(Mathf.FloorToInt(scaled), 0, segments - 1);
+        float localT = Mathf.Clamp01(scaled - seg);
+
+        // For Catmull-Rom we need p0,p1,p2,p3 where p1..p2 is the segment
+        Vector3 p0 = (seg - 1 >= 0) ? pts[seg - 1] : pts[seg];
+        Vector3 p1 = pts[seg];
+        Vector3 p2 = pts[seg + 1];
+        Vector3 p3 = (seg + 2 < pts.Length) ? pts[seg + 2] : pts[seg + 1];
+
+        // Use standard Catmull-Rom with tension 0.5 (centripetal-ish). We can expose tension per PathDefinition if needed.
+        // Implement a centripetal Catmull-Rom parameterized by alpha (use 0.5 default if not provided)
+        float alpha = 0.5f;
+
+        // Compute point
+        return CatmullRom(p0, p1, p2, p3, localT, alpha);
+    }
+
+    // Catmull-Rom (centripetal) interpolation
+    static Vector3 CatmullRom(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t, float alpha = 0.5f)
+    {
+        // Based on parametric Catmull-Rom with chordal parameterization
+        float GetK(Vector3 a, Vector3 b) => Mathf.Pow((b - a).magnitude, alpha);
+
+        float k0 = 0f;
+        float k1 = k0 + GetK(p0, p1);
+        float k2 = k1 + GetK(p1, p2);
+        float k3 = k2 + GetK(p2, p3);
+
+        // Avoid degenerate
+        if (Mathf.Approximately(k1, k0)) k1 = k0 + 1e-4f;
+        if (Mathf.Approximately(k2, k1)) k2 = k1 + 1e-4f;
+        if (Mathf.Approximately(k3, k2)) k3 = k2 + 1e-4f;
+
+        float t0 = Mathf.Lerp(k1, k2, t);
+        // Interpolate
+        Vector3 A1 = ((k1 - t0) / (k1 - k0)) * p0 + ((t0 - k0) / (k1 - k0)) * p1;
+        Vector3 A2 = ((k2 - t0) / (k2 - k1)) * p1 + ((t0 - k1) / (k2 - k1)) * p2;
+        Vector3 A3 = ((k3 - t0) / (k3 - k2)) * p2 + ((t0 - k2) / (k3 - k2)) * p3;
+
+        float t1 = Mathf.Lerp(k1, k2, t);
+        Vector3 B1 = ((k2 - t1) / (k2 - k0)) * A1 + ((t1 - k0) / (k2 - k0)) * A2;
+        Vector3 B2 = ((k3 - t1) / (k3 - k1)) * A2 + ((t1 - k1) / (k3 - k1)) * A3;
+
+        float t2 = Mathf.Lerp(k1, k2, t);
+        Vector3 C = ((k2 - t2) / (k2 - k1)) * B1 + ((t2 - k1) / (k2 - k1)) * B2;
+        return C;
+    }
+
+    // --- Utilities ----------------------------------------------------
+
     public void SnapToIndex(int idx)
     {
         if (!HasCameraPoints())
@@ -371,7 +508,6 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
 
         if (mouseLook != null)
         {
-            // apply profile if exists
             if (profiles != null && profiles.Length == cameraPoints.Length)
                 mouseLook.ApplyProfile(profiles[currentIndex]);
             else
@@ -383,52 +519,63 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         }
     }
 
-    // Draw bezier preview for consecutive points
+    // Draw gizmos for custom paths and active path
     void OnDrawGizmosSelected()
     {
-        // If currently transitioning and p0/p1/p2 are valid, draw active curve
-        if (isTransitioning && p0 != Vector3.zero && p2 != Vector3.zero && pathMode == PathMode.Curved)
+        // draw configured custom paths
+        if (customPaths != null)
         {
-            Gizmos.color = Color.cyan;
-            DrawQuadratic(p0, p1, p2, 24);
-        }
-
-        // If cameraPoints are assigned, draw preview for each adjacent pair
-        if (cameraPoints != null && cameraPoints.Length > 1 && pathMode == PathMode.Curved)
-        {
-            for (int i = 0; i < cameraPoints.Length - 1; i++)
+            for (int i = 0; i < customPaths.Length; i++)
             {
-                Transform aT = cameraPoints[i];
-                Transform cT = cameraPoints[i + 1];
-                if (aT == null || cT == null) continue;
+                var pd = customPaths[i];
+                if (pd == null) continue;
+                // try to fetch start/end positions
+                Vector3 start = (HasCameraPoints() && pd.fromIndex >= 0 && pd.fromIndex < cameraPoints.Length && cameraPoints[pd.fromIndex] != null) ? cameraPoints[pd.fromIndex].position : Vector3.zero;
+                Vector3 end = (HasCameraPoints() && pd.toIndex >= 0 && pd.toIndex < cameraPoints.Length && cameraPoints[pd.toIndex] != null) ? cameraPoints[pd.toIndex].position : Vector3.zero;
+                if (start == Vector3.zero && end == Vector3.zero) continue;
 
-                Vector3 a = aT.position;
-                Vector3 c = cT.position;
-                Vector3 mid = (a + c) * 0.5f;
-                Vector3 forwardDir = (c - a).normalized;
-                float forwardPush = Mathf.Clamp01(Vector3.Distance(a, c) * 0.2f);
-                mid += forwardDir * forwardPush;
-                float distance = Vector3.Distance(a, c);
-                float scaledArc = arcHeight * Mathf.Clamp01(distance / 3f);
-                mid += Vector3.up * scaledArc;
-                Vector3 b = mid;
+                // gather points
+                List<Vector3> pts = new List<Vector3>();
+                pts.Add(start);
+                if (pd.controlPoints != null && pd.controlPoints.Length > 0)
+                {
+                    foreach (var ct in pd.controlPoints) if (ct != null) pts.Add(ct.position);
+                }
+                pts.Add(end);
 
-                // color alternation to make it readable
-                Gizmos.color = (i % 2 == 0) ? Color.yellow : Color.magenta;
-                DrawQuadratic(a, b, c, 32);
+                // sample curve and draw
+                Gizmos.color = pd.gizmoColor;
+                Vector3 prev = pts[0];
+                int steps = Mathf.Max(8, activeSampleResolution);
+                for (int s = 1; s <= steps; s++)
+                {
+                    float u = s / (float)steps;
+                    Vector3 p = SamplePathPosition(pts.ToArray(), u);
+                    Gizmos.DrawLine(prev, p);
+                    prev = p;
+                }
+                // draw control point spheres
+                Gizmos.color = Color.yellow;
+                for (int k = 0; k < pts.Count; k++)
+                {
+                    Gizmos.DrawWireSphere(pts[k], 0.08f);
+                }
             }
         }
-    }
 
-    void DrawQuadratic(Vector3 a, Vector3 b, Vector3 c, int steps)
-    {
-        Vector3 prev = a;
-        for (int i = 1; i <= steps; i++)
+        // draw active path if transitioning and has activePathPoints
+        if (isTransitioning && activePathPoints != null && activePathPoints.Length > 1)
         {
-            float tt = i / (float)steps;
-            Vector3 p = BezierQuadratic(a, b, c, tt);
-            Gizmos.DrawLine(prev, p);
-            prev = p;
+            Gizmos.color = Color.cyan;
+            Vector3 prev = activePathPoints[0];
+            int steps = Mathf.Max(16, activeSampleResolution);
+            for (int s = 1; s <= steps; s++)
+            {
+                float u = s / (float)steps;
+                Vector3 p = SamplePathPosition(activePathPoints, u);
+                Gizmos.DrawLine(prev, p);
+                prev = p;
+            }
         }
     }
 }

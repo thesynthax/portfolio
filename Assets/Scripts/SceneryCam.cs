@@ -3,6 +3,12 @@ using UnityEngine;
 [DisallowMultipleComponent]
 public class CameraPositionDrivenMicroLook : MonoBehaviour
 {
+    public enum RotationMode
+    {
+        Legacy,   // original math (may produce roll in extreme pitches)
+        WorldUp   // yaw around world up, pitch around the right after yaw, final LookRotation with up vector (no roll)
+    }
+
     [System.Serializable]
     public struct Profile
     {
@@ -38,13 +44,18 @@ public class CameraPositionDrivenMicroLook : MonoBehaviour
     [Tooltip("When blending influence, how long (seconds) it takes.")]
     public float influenceBlendTime = 0.35f;
 
+    [Header("Rotation behavior")]
+    public RotationMode rotationMode = RotationMode.WorldUp;
+    [Tooltip("If using WorldUp mode, this is the up vector used for yaw/pitch composition.")]
+    public Vector3 upVector = Vector3.up;
+
     // internals
     Vector3 initialLocalPos;
     Quaternion initialLocalRot;
 
     // target and current angles (relative to initialLocalRot)
-    float targetYaw = 0f;
-    float targetPitch = 0f;
+    float targetYaw = 0f;   // degrees (positive = turn right)
+    float targetPitch = 0f; // degrees (positive = look up)
     float currentYaw = 0f;
     float currentPitch = 0f;
 
@@ -52,10 +63,6 @@ public class CameraPositionDrivenMicroLook : MonoBehaviour
     float yawVel = 0f;
     float pitchVel = 0f;
     Vector3 posVel = Vector3.zero;
-
-    // input smoothing
-    Vector2 smoothedMouse = Vector2.zero;
-    float inputFilterStrength = 12f; // internal smoothing factor
 
     // internal influence blend state
     float influenceVel = 0f;
@@ -74,6 +81,7 @@ public class CameraPositionDrivenMicroLook : MonoBehaviour
     void OnEnable()
     {
         // When enabled ensure current angles match initial rotation (avoid snap)
+        // NOTE: with WorldUp mode it's safer to treat the current transform as neutral
         SyncToCameraRotationInstant();
     }
 
@@ -115,8 +123,48 @@ public class CameraPositionDrivenMicroLook : MonoBehaviour
             currentYaw = Mathf.SmoothDampAngle(currentYaw, targetYaw, ref yawVel, activeProfile.rotationSmoothTime, Mathf.Infinity, Time.deltaTime);
             currentPitch = Mathf.SmoothDampAngle(currentPitch, targetPitch, ref pitchVel, activeProfile.rotationSmoothTime, Mathf.Infinity, Time.deltaTime);
 
-            // Compose rotation and then lerp toward it based on influence (so influence blends effect)
-            Quaternion desiredRot = initialLocalRot * Quaternion.Euler(currentPitch, currentYaw, 0f);
+            // Compose rotation according to chosen mode
+            Quaternion desiredRot;
+            if (rotationMode == RotationMode.Legacy)
+            {
+                // legacy behavior: rotate relative to initialLocalRot using simple euler (keeps previous semantics)
+                desiredRot = initialLocalRot * Quaternion.Euler(currentPitch, currentYaw, 0f);
+            }
+            else // WorldUp mode
+            {
+                // 1) start from the initial forward in world space
+                Vector3 initialForwardWorld = transform.parent != null
+                    ? transform.parent.TransformDirection(initialLocalRot * Vector3.forward)
+                    : (initialLocalRot * Vector3.forward);
+
+                // But simpler: compute world-space initial forward/up based on initialLocalRot using parent's transform
+                Vector3 initForward = (transform.parent != null) ? transform.parent.rotation * (initialLocalRot * Vector3.forward) : (initialLocalRot * Vector3.forward);
+                // Apply yaw around the global upVector
+                Vector3 yawedForward = Quaternion.AngleAxis(currentYaw, upVector.normalized) * initForward;
+
+                // Compute right axis after yaw (world-space)
+                Vector3 rightAxis = Vector3.Cross(upVector.normalized, yawedForward).normalized;
+                if (rightAxis.sqrMagnitude < 1e-6f)
+                {
+                    // edge case: forward aligns with up (very steep), fallback to parent's right or world right
+                    rightAxis = transform.parent != null ? transform.parent.right : Vector3.right;
+                }
+
+                // Apply pitch around the right axis
+                Vector3 pitchedForward = Quaternion.AngleAxis(currentPitch, rightAxis) * yawedForward;
+
+                // Build rotation such that forward is pitchedForward and up is aligned to upVector (removes roll)
+                desiredRot = Quaternion.LookRotation(pitchedForward.normalized, upVector.normalized);
+
+                // Convert desiredRot into local-space relative to parent to respect initialLocalRot's parent
+                if (transform.parent != null)
+                {
+                    // desiredRot is world-space, convert to local
+                    desiredRot = Quaternion.Inverse(transform.parent.rotation) * desiredRot;
+                }
+            }
+
+            // Lerp/slerp from current local rotation toward desired by influence
             transform.localRotation = Quaternion.Slerp(transform.localRotation, desiredRot, influence);
 
             // Positional parallax based on current angles, then blended by influence
@@ -162,29 +210,21 @@ public class CameraPositionDrivenMicroLook : MonoBehaviour
         targetInfluence = 1f;
     }
 
-    // Immediately sync internal currentYaw/currentPitch to match the camera's current world rotation,
-    // so when influence later increases it won't cause a jump.
-    // This queries transform.rotation and sets currentYaw/currentPitch relative to initialLocalRot.
+    // Sync: for the new world-up style it's safer to treat current transform as neutral.
+    // This avoids complex angle extraction that can be error prone.
     public void SyncToCameraRotationInstant()
     {
-        // compute delta from initialLocalRot to current world local rotation
-        Quaternion worldToLocal = Quaternion.Inverse(initialLocalRot) * transform.localRotation;
-        Vector3 e = worldToLocal.eulerAngles;
-        // Convert angles to signed -180..180 range
-        float yaw = NormalizeAngle(e.y);
-        float pitch = NormalizeAngle(e.x);
-
-        currentYaw = Mathf.Clamp(yaw, -Mathf.Abs(activeProfile.maxYaw), Mathf.Abs(activeProfile.maxYaw));
-        currentPitch = Mathf.Clamp(pitch, -Mathf.Abs(activeProfile.maxPitch), Mathf.Abs(activeProfile.maxPitch));
-
-        // set target to same so smoothing won't cause jumps
-        targetYaw = currentYaw;
-        targetPitch = currentPitch;
-
-        // zero velocities so blends start cleanly
+        // Make the mouse-look internally think it's at rest relative to its current rotation:
+        // i.e., zero the internal angular offsets so blending won't jump.
+        currentYaw = 0f;
+        currentPitch = 0f;
+        targetYaw = 0f;
+        targetPitch = 0f;
         yawVel = pitchVel = 0f;
+        influenceVel = 0f;
     }
 
+    // Set the neutral local pose to current transform local pose
     public void SetInitialToCurrent()
     {
         initialLocalPos = transform.localPosition;
@@ -197,11 +237,10 @@ public class CameraPositionDrivenMicroLook : MonoBehaviour
     public void SetInitialFromTransform(Transform t)
     {
         if (t == null) return;
-        // If the camera is parented differently, you may want to set world-to-local correctly.
-        // This assumes the mouseLook component is on the very same camera transform.
+
+        // Set camera transform to the target's world pose and set it as neutral.
         transform.position = t.position;
         transform.rotation = t.rotation;
-
         SetInitialToCurrent();
     }
 
