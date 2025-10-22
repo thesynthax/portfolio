@@ -1,24 +1,35 @@
 using UnityEngine;
 using UnityEngine.UI;
-using System.Collections;
 using System.Collections.Generic;
+using TMPro;
 
+/// <summary>
+/// Minimap navigator: spawns buttons horizontally near the top of the container,
+/// and requests a DIRECT move to the target index when a button is clicked.
+/// </summary>
 public class MinimapNavigator : MonoBehaviour
 {
     [Header("References")]
     public CameraMoverNoCoroutines_WithMouseLookIntegration cameraMover;
     public RectTransform buttonContainer; // UI panel where buttons will be instantiated
     public Button buttonPrefab;
-    public Color idleColor = Color.white;
-    public Color activeColor = Color.green;
+    public Color idleColor = Color.gray;
+    public Color activeColor = Color.white;
     public Color visitedColor = new Color(0.8f, 0.8f, 0.8f);
 
-    [Header("Step timing")]
+    [Header("Layout")]
+    [Tooltip("Pixels from the top edge of the container")]
+    public float paddingTop = 12f;
+    [Tooltip("Spacing between buttons in pixels")]
+    public float spacing = 8f;
+    [Tooltip("Optional maximum horizontal width to allow wrapping/clamping. 0 = no clamp")]
+    public float maxAllowedWidth = 0f;
+
+    [Header("Step timing (unused for direct jumps)")]
     public float stepDelay = 0.12f;
 
     List<Button> buttons = new List<Button>();
     int currentIndex = 0;
-    Coroutine stepRoutine = null;
 
     void Start()
     {
@@ -38,14 +49,69 @@ public class MinimapNavigator : MonoBehaviour
     {
         ClearButtons();
         if (cameraMover.cameraPoints == null) return;
+
         int n = cameraMover.cameraPoints.Length;
+        if (n == 0) return;
+
+        // Custom labels for each camera index
+        string[] labels = new string[]
+        {
+            "Creative",
+            "Technical Intro",
+            "Skills",
+            "Experience",
+            "Projects",
+            "Fun Facts"
+        };
+
+        // read prefab size (local) via RectTransform
+        var prefabRT = buttonPrefab.GetComponent<RectTransform>();
+        Vector2 btnSize = (prefabRT != null) ? prefabRT.sizeDelta : new Vector2(80f, 32f);
+
+        float totalWidth = n * btnSize.x + Mathf.Max(0, n - 1) * spacing;
+
+        if (maxAllowedWidth > 0f && totalWidth > maxAllowedWidth)
+        {
+            float avail = Mathf.Max(1f, maxAllowedWidth - n * btnSize.x);
+            spacing = avail / Mathf.Max(1, n - 1);
+            totalWidth = n * btnSize.x + Mathf.Max(0, n - 1) * spacing;
+        }
+
+        Rect containerRect = buttonContainer.rect;
+        float startX = -totalWidth * 0.5f + btnSize.x * 0.5f;
+
         for (int i = 0; i < n; i++)
         {
             Button b = Instantiate(buttonPrefab, buttonContainer);
             int idx = i;
+            b.onClick.RemoveAllListeners();
             b.onClick.AddListener(() => OnButtonClicked(idx));
-            var txt = b.GetComponentInChildren<Text>();
-            if (txt != null) txt.text = (idx).ToString();
+
+            // Set button label
+            var txt = b.GetComponentInChildren<TextMeshProUGUI>();
+            if (txt != null)
+            {
+                if (i < labels.Length)
+                    txt.text = labels[i];
+                else
+                    txt.text = $"Point {i}";
+                txt.textWrappingMode = TextWrappingModes.Normal;
+            }
+
+            // Position the button horizontally near top
+            var rt = b.GetComponent<RectTransform>();
+            if (rt != null)
+            {
+                rt.anchorMin = new Vector2(0.5f, 1f);
+                rt.anchorMax = new Vector2(0.5f, 1f);
+                rt.pivot = new Vector2(0.5f, 1f);
+
+                float x = startX + i * (btnSize.x + spacing);
+                float y = -paddingTop;
+                rt.anchoredPosition = new Vector2(x, y);
+                rt.sizeDelta = btnSize;
+            }
+
             buttons.Add(b);
         }
     }
@@ -60,47 +126,14 @@ public class MinimapNavigator : MonoBehaviour
     void OnButtonClicked(int target)
     {
         if (cameraMover == null) return;
-        if (stepRoutine != null) StopCoroutine(stepRoutine);
-        stepRoutine = StartCoroutine(StepToTargetRoutine(target));
-    }
-
-    IEnumerator StepToTargetRoutine(int target)
-    {
-        // If same index, do nothing (maybe snap)
-        if (target == currentIndex) yield break;
-
-        // Determine direction
-        int dir = (target > currentIndex) ? 1 : -1;
-        while (currentIndex != target)
-        {
-            int next = currentIndex + dir;
-            // call StartTransitionToIndex and wait until mover completes
-            cameraMover.StartTransitionToIndex(next);
-            // wait until mover finished (we listen to OnMoverComplete to update currentIndex)
-            bool completed = false;
-            System.Action<int> onComplete = (idx) => { completed = true; };
-            cameraMover.OnTransitionComplete += onComplete;
-            // safety timeout
-            float timer = 0f;
-            while (!completed && timer < 5f)
-            {
-                timer += Time.deltaTime;
-                yield return null;
-            }
-            cameraMover.OnTransitionComplete -= onComplete;
-
-            // currentIndex will be updated by OnMoverComplete
-            // but in case it wasn't, force set
-            if (!completed) currentIndex = Mathf.Clamp(next, 0, cameraMover.cameraPoints.Length - 1);
-            UpdateButtonStates();
-            yield return new WaitForSeconds(stepDelay);
-        }
-        stepRoutine = null;
+        // Directly request move to target index
+        cameraMover.StartTransitionToIndex(target, true);
+        // UI will be updated when OnMoverComplete fires
     }
 
     void OnMoverComplete(int idx)
     {
-        currentIndex = idx;
+        currentIndex = Mathf.Clamp(idx, 0, (cameraMover.cameraPoints != null ? cameraMover.cameraPoints.Length - 1 : 0));
         UpdateButtonStates();
     }
 

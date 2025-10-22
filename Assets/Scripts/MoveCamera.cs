@@ -59,6 +59,7 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         public float tension = 0.5f;
         [Tooltip("Color used to draw the gizmo for this path")]
         public Color gizmoColor = Color.cyan;
+        public float duration = 1f;
     }
 
     [Tooltip("List of custom path definitions between camera points (fromIndex -> toIndex).")]
@@ -182,6 +183,7 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
                 EndTransition();
             }
         }
+
     }
 
     void HandleClickInput()
@@ -237,6 +239,8 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
                 }
             }
         }
+
+        backColliders[3].enabled = currentIndex != 2; 
     }
 
     void TryMoveToIndex(int targetIndex)
@@ -250,11 +254,11 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         if (targetIndex == currentIndex) return;
         if (Mathf.Abs(targetIndex - currentIndex) == 1)
         {
-            StartTransitionToIndex(targetIndex);
+            StartTransitionToIndex(targetIndex, false);
         }
     }
 
-    public void StartTransitionToIndex(int targetIndex)
+    public void StartTransitionToIndex(int targetIndex, bool allowNonAdjacent = false)
     {
         if (!HasCameraPoints())
         {
@@ -264,7 +268,7 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         targetIndex = Mathf.Clamp(targetIndex, 0, cameraPoints.Length - 1);
         if (isTransitioning) return;
         if (targetIndex == currentIndex) return;
-        if (Mathf.Abs(targetIndex - currentIndex) != 1)
+        if (!allowNonAdjacent && Mathf.Abs(targetIndex - currentIndex) != 1)
         {
             Debug.LogWarning($"[CameraMover] StartTransitionToIndex: target {targetIndex} is not adjacent to current {currentIndex}. Ignored.");
             return;
@@ -285,7 +289,14 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         destinationIndex = targetIndex;
         startPos = transform.position;
         startRot = transform.rotation;
-        currentDuration = Mathf.Max(0.01f, duration);
+        float thisDuration = duration;
+        foreach (PathDefinition path in customPaths) {
+            if ((currentIndex == path.fromIndex && destinationIndex == path.toIndex)
+                    || (currentIndex == path.toIndex && destinationIndex == path.fromIndex)) {
+                thisDuration = path.duration;
+            }
+        }
+        currentDuration = Mathf.Max(0.01f, thisDuration);
         t = 0f;
 
         // build activePathPoints by checking customPaths
