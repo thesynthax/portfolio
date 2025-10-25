@@ -71,6 +71,8 @@ public class RiverHighlight : MonoBehaviour
             current = hitWater ? UnlitWhite : original;
             var rend = GetComponent<Renderer>();
             if (rend != null) rend.material = current;
+        } else {
+            GetComponent<Renderer>().material = original;
         }
 
         // animate creativeRoot if requested

@@ -1,8 +1,65 @@
 body { padding: 0; margin: 0 }
 #unity-container { position: fixed; width: 100%; height: 100%; }
-#unity-canvas { width: 100%; height: 100%; background: {{{ BACKGROUND_COLOR }}} }
-#unity-loading-bar { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none }
-#unity-logo { width: 154px; height: 130px; background: url('unity-logo-{{{ SPLASH_SCREEN_STYLE.toLowerCase() }}}.png') no-repeat center }
+#unity-canvas { width: 100%; height: 100%; background: {{{ BACKGROUND_COLOR }}}; position: relative; z-index: 1; }
+#unity-loading-bar { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none; z-index: 3;}
 #unity-progress-bar-empty { margin-left: auto; margin-right: auto; width: 141px; height: 18px; margin-top: 10px; background: url('progress-bar-empty-{{{ SPLASH_SCREEN_STYLE.toLowerCase() }}}.png') no-repeat center }
 #unity-progress-bar-full { width: 0%; height: 18px; margin-top: 10px; background: url('progress-bar-full-{{{ SPLASH_SCREEN_STYLE.toLowerCase() }}}.png') no-repeat center }
-#unity-warning { position: absolute; left: 50%; top: 5%; transform: translate(-50%); background: white; padding: 10px; display: none }
+#unity-warning { position: absolute; left: 50%; top: 5%; transform: translate(-50%); background: white; padding: 10px; display: none; z-index: 4}
+
+/* FONT - path relative to this file (TemplateData), just the filename */
+@font-face {
+  font-family: "ElectronicHighway";
+  src: url("Electronic Highway Sign.TTF") format("truetype");
+}
+
+#loader-background {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  top: 0;
+  left: 0;
+  z-index: 2; /* ABOVE the canvas (z-index:1), BELOW loading bar (z-index:3) */
+  background: black;
+  transition: opacity 0.9s ease;
+}
+
+.loader-fade {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  background-size: cover;
+  background-position: center;
+  opacity: 0;
+  transition: opacity 1.1s ease;
+  z-index: 2;
+}
+
+.loader-fade.fade-in {
+  opacity: 1;
+}
+
+.loader-fadeout {
+  opacity: 0 !important;
+}
+
+#welcome-text {
+  position: absolute;
+  top: 42%;
+  width: 100%;
+  text-align: center;
+  font-family: "ElectronicHighway", monospace;
+  font-size: 2.2em;
+  color: #00ff99;
+  text-shadow: 0 0 10px #00ff99;
+  letter-spacing: 2px;
+  animation: glow-pulse 1.2s infinite alternate;
+  z-index: 3; /* above loader-bg images, but still below the loading-bar UI if needed */
+}
+
+@keyframes glow-pulse {
+  from { text-shadow: 0 0 8px #00ff99; }
+  to { text-shadow: 0 0 18px #00ff99; }
+}
+
+

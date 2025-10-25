@@ -30,14 +30,40 @@ public class MinimapNavigator : MonoBehaviour
 
     List<Button> buttons = new List<Button>();
     int currentIndex = 0;
+    bool hasReachedLastIdx = false;
+    Vector3 buttonInitPos, buttonFinalPos;
+    public float buttonBringSpeed = 10f;
+    public float buttonInitY = 80f;
 
     void Start()
     {
         if (cameraMover == null || buttonContainer == null || buttonPrefab == null) return;
+        buttonContainer.gameObject.SetActive(false);
         PopulateButtons();
         currentIndex = 0;
         UpdateButtonStates();
         cameraMover.OnTransitionComplete += OnMoverComplete;
+        buttonFinalPos = buttonContainer.position;
+        buttonContainer.position += buttonInitY * Vector3.up;
+        buttonInitPos = buttonContainer.position;
+    }
+
+    void Update()
+    {
+        if (currentIndex == 5) hasReachedLastIdx = true;
+
+        if (hasReachedLastIdx) BringButtons();
+
+        foreach (Button b in buttons) {
+            b.transform.GetChild(1).gameObject.SetActive(b.GetComponent<HoverCheck>().isHovering);
+        }
+
+    }
+
+    void BringButtons() {
+        buttonContainer.gameObject.SetActive(true);
+        if ((buttonContainer.position - buttonFinalPos).sqrMagnitude > 0.05f)
+            buttonContainer.position = Vector3.Lerp(buttonContainer.position, buttonFinalPos, buttonBringSpeed * Time.deltaTime);
     }
 
     void OnDestroy()
@@ -142,10 +168,11 @@ public class MinimapNavigator : MonoBehaviour
         for (int i = 0; i < buttons.Count; i++)
         {
             var img = buttons[i].GetComponent<Image>();
+            var txt = img.GetComponentInChildren<TextMeshProUGUI>();
             if (img == null) continue;
-            if (i == currentIndex) img.color = activeColor;
-            else if (i < currentIndex) img.color = visitedColor;
-            else img.color = idleColor;
+            if (i == currentIndex) { img.color = activeColor; txt.color = activeColor; }
+            //else if (i < currentIndex) { img.color = visitedColor; txt.color = visitedColor; }
+            else { img.color = idleColor; txt.color = idleColor; }
         }
     }
 }

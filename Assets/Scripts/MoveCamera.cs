@@ -1,6 +1,7 @@
 using UnityEngine;
 using System;
 using System.Collections.Generic;
+using UnityEngine.InputSystem;
 
 [DisallowMultipleComponent]
 public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
@@ -125,6 +126,7 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
     }
 
     bool HasCameraPoints() => cameraPoints != null && cameraPoints.Length > 0;
+
 
     void Update()
     {
@@ -308,6 +310,7 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
         {
             mouseLook.BlendOut(mouseLookBlendTime);
         }
+        SnapMouseToCenterOnce();
         OnTransitionStart?.Invoke(destinationIndex);
     }
 
@@ -588,6 +591,11 @@ public class CameraMoverNoCoroutines_WithMouseLookIntegration : MonoBehaviour
                 prev = p;
             }
         }
+    }
+
+    void SnapMouseToCenterOnce() {
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.lockState = CursorLockMode.None;
     }
 }
 

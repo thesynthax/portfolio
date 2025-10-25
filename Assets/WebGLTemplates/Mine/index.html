@@ -9,35 +9,42 @@
     <link rel="manifest" href="manifest.webmanifest">
   </head>
   <body>
+    
     <div id="unity-container">
       <canvas id="unity-canvas" width=1920 height=1080 tabindex="-1"></canvas>
+
+      <!-- Loader background sits above the canvas (so it's visible), but below the loading UI -->
+      <div id="loader-background">
+        <div class="loader-fade"></div>
+        <div id="welcome-text">Welcome to TheSynthax's Portfolio</div>
+      </div>
+
+      <!-- Unity loading bar must be on top so the user can see progress -->
       <div id="unity-loading-bar">
-        <!--div id="unity-logo"></div-->
+        <div id="unity-logo"></div>
         <div id="unity-progress-bar-empty">
           <div id="unity-progress-bar-full"></div>
         </div>
       </div>
+
       <div id="unity-warning"> </div>
     </div>
+
     <script>
+      // Service worker registration (leave as-is)
       window.addEventListener("load", function () {
         if ("serviceWorker" in navigator) {
           navigator.serviceWorker.register("ServiceWorker.js");
         }
       });
 
+      // DOM elements
       var container = document.querySelector("#unity-container");
       var canvas = document.querySelector("#unity-canvas");
       var loadingBar = document.querySelector("#unity-loading-bar");
       var progressBarFull = document.querySelector("#unity-progress-bar-full");
       var warningBanner = document.querySelector("#unity-warning");
 
-      // Shows a temporary message banner/ribbon for a few seconds, or
-      // a permanent error message on top of the canvas if type=='error'.
-      // If type=='warning', a yellow highlight color is used.
-      // Modify or remove this function to customize the visually presented
-      // way that non-critical warnings and error messages are presented to the
-      // user.
       function unityShowBanner(msg, type) {
         function updateBannerVisibility() {
           warningBanner.style.display = warningBanner.children.length ? 'block' : 'none';
@@ -57,16 +64,24 @@
       }
 
       var buildUrl = "Build";
-      var loaderUrl = buildUrl + "/Draft.loader.js";
+      var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}";
       var config = {
         arguments: [],
-        dataUrl: buildUrl + "/Draft.data.gz",
-        frameworkUrl: buildUrl + "/Draft.framework.js.gz",
-        codeUrl: buildUrl + "/Draft.wasm.gz",
+        dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}",
+        frameworkUrl: buildUrl + "/{{{ FRAMEWORK_FILENAME }}}",
+#if USE_THREADS
+        workerUrl: buildUrl + "/{{{ WORKER_FILENAME }}}",
+#endif
+#if USE_WASM
+        codeUrl: buildUrl + "/{{{ CODE_FILENAME }}}",
+#endif
+#if SYMBOLS_FILENAME
+        symbolsUrl: buildUrl + "/{{{ SYMBOLS_FILENAME }}}",
+#endif
         streamingAssetsUrl: "StreamingAssets",
-        companyName: "thesynthax",
-        productName: "Portfolio",
-        productVersion: "1.0.0",
+        companyName: {{{ JSON.stringify(COMPANY_NAME) }}},
+        productName: {{{ JSON.stringify(PRODUCT_NAME) }}},
+        productVersion: {{{ JSON.stringify(PRODUCT_VERSION) }}},
         showBanner: unityShowBanner,
         // errorHandler: function(err, url, line) {
         //    alert("error " + err + " occurred at line " + line);
@@ -89,18 +104,102 @@
         meta.name = 'viewport';
         meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
         document.getElementsByTagName('head')[0].appendChild(meta);
+        window.location.href = "https://thesynthax.space/static";
       }
-
 
       loadingBar.style.display = "block";
 
+      // ---- Slideshow + welcome text logic ----
+      let textCompleted = false;
+
+      const loaderImages = [
+        "preview_0.png",
+        "preview_1.png",
+        "preview_2.png",
+        "preview_3.png",
+        "preview_4.png",
+        "preview_5.png"
+      ].map(p => "TemplateData/" + p);
+
+      const fadeElem = document.querySelector(".loader-fade");
+      const welcomeText = document.getElementById("welcome-text");
+      const loaderBg = document.getElementById("loader-background");
+
+      let loadingProgress = 0.0; // 0..1
+      let slideshowInterval = null;
+      let currentIndex = 0;
+
+      // typewriter welcome text
+      const fullText = "Welcome to TheSynthax's Portfolio";
+      welcomeText.textContent = "";
+      (function typeWrite() {
+        let idx = 0;
+        const speed = 40;
+        const ti = setInterval(() => {
+          if (idx < fullText.length && !textCompleted) {
+            welcomeText.textContent += fullText[idx++];
+          } else {
+            textCompleted = true;
+            clearInterval(ti);
+          }
+        }, speed);
+      })();
+
+
+      function showImage(index) {
+        fadeElem.style.backgroundImage = `url('${loaderImages[index]}')`;
+        fadeElem.classList.remove("fade-in");
+        void fadeElem.offsetWidth;
+        fadeElem.classList.add("fade-in");
+      }
+
+      function startSlideshow() {
+        currentIndex = Math.floor(Math.random() * loaderImages.length);
+        showImage(currentIndex);
+
+        slideshowInterval = setInterval(() => {
+          if (loadingProgress >= 0.92) {
+            currentIndex = 0;
+            showImage(currentIndex);
+            clearInterval(slideshowInterval);
+            slideshowInterval = setInterval(() => showImage(0), 3500);
+            return;
+          }
+          let next = Math.floor(Math.random() * loaderImages.length);
+          if (next === currentIndex) next = (next + 1) % loaderImages.length;
+          currentIndex = next;
+          showImage(currentIndex);
+        }, 3500);
+      }
+
+      function fadeOutLoaderAndRemove() {
+        //loaderBg.classList.add("loader-fadeout");
+        setTimeout(() => {
+          if (loaderBg && loaderBg.parentNode) loaderBg.parentNode.removeChild(loaderBg);
+        }, 900);
+      }
+
+      startSlideshow();
+
+      // ---- Unity loader injection with progress callback ----
       var script = document.createElement("script");
       script.src = loaderUrl;
       script.onload = () => {
         createUnityInstance(canvas, config, (progress) => {
           progressBarFull.style.width = 100 * progress + "%";
+          loadingProgress = Math.max(loadingProgress, progress);
+
+          // if loading is nearly complete and text isn't finished, complete it instantly
+          if (progress >= 0.9) {
+            textCompleted = true;
+            welcomeText.textContent = fullText;      // instantly show full message
+            showImage(0);                            // show the first preview image
+          }
         }).then((unityInstance) => {
+          // hide the unity loading bar then fade out background
           loadingBar.style.display = "none";
+          fadeOutLoaderAndRemove();
+
         }).catch((message) => {
           alert(message);
         });
